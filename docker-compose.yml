@@ -1,0 +1,30 @@
+services:
+    XTR-warp:
+        shm_size: 4gb
+        image: hyukkyukang/xtr-warp:latest
+        container_name: XTR-warp
+        stdin_open: true
+        tty: true
+        user: $UID:$GID
+        network_mode: "host"
+        environment:
+            - TZ=Asia/Seoul
+        volumes:
+            - /etc/timezone:/etc/timezone:ro 
+            - ./:/root/warp/
+            - /mnt/md0/hkkang:/mnt/md0/hkkang
+        working_dir: /root
+        command: >
+            sh -c "echo root | su root -c 'groupadd -g ${GID} usergroup || true' &&
+            echo root | su root -c 'useradd -s /bin/bash -m user -u ${UID} -g ${GID}' &&
+            echo root | su root -c 'echo \"user:user\" | chpasswd' &&
+            echo root | su root -c 'echo \"user ALL=(ALL) NOPASSWD:ALL\" >> /etc/sudoers' &&
+            echo \"export PATH=/home/user/.local/bin:$PATH\" >> /home/user/.bashrc &&
+            echo \"export PYTHONPATH=/root/warp/\" >> /home/user/.bashrc &&
+            tail -f /dev/null"
+        deploy:
+            resources:
+                reservations:
+                    devices:
+                        - capabilities: [gpu]
+

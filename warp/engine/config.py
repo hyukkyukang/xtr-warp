@@ -11,14 +11,16 @@ from warp.engine.runtime.onnx_model import XTROnnxConfig
 
 if USE_CORE_ML:
     from warp.engine.runtime.coreml_model import XTRCoreMLConfig
+
     RuntimeConfig = Union[XTROnnxConfig, XTRCoreMLConfig]
 else:
     RuntimeConfig = XTROnnxConfig
 
+
 @dataclass
 class WARPRunConfig:
     nbits: int
-    
+
     collection: Literal["beir", "lotte"]
     dataset: str
     datasplit: Literal["train", "dev", "test"]
@@ -35,8 +37,12 @@ class WARPRunConfig:
     # NOTE To be more efficient, we could also derive this from the dataset.
     #      For now we just set it to a sufficiently high constant value.
     bound: int = 128
-    
+
     nranks: int = 1
+
+    batch_size: int = 8
+    num_workers: int = 8
+    resume: bool = False
 
     # runtime == None uses "default" PyTorch for inference.
     runtime: Optional[RuntimeConfig] = None
@@ -65,7 +71,9 @@ class WARPRunConfig:
         BEIR_COLLECTION_PATH = os.environ["BEIR_COLLECTION_PATH"]
         LOTTE_COLLECTION_PATH = os.environ["LOTTE_COLLECTION_PATH"]
         if self.collection == "beir":
-            return f"{BEIR_COLLECTION_PATH}/{self.dataset}/questions.{self.datasplit}.tsv"
+            return (
+                f"{BEIR_COLLECTION_PATH}/{self.dataset}/questions.{self.datasplit}.tsv"
+            )
         elif self.collection == "lotte":
             return f"{LOTTE_COLLECTION_PATH}/{self.dataset}/{self.datasplit}/questions.{self.type_}.tsv"
         raise AssertionError
@@ -87,4 +95,7 @@ class WARPRunConfig:
             query_maxlen=QUERY_MAXLEN,
             index_path=f"{self.index_root}/{self.index_name}",
             root="./",
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            resume=self.resume,
         )
