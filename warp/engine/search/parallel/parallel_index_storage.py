@@ -1,14 +1,15 @@
 import os
 import pathlib
-import torch
-import numpy as np
 
+import numpy as np
+import torch
+from torch.utils.cpp_extension import load
+
+from configs import USE_GPU
+from warp.engine.constants import T_PRIME_MAX, TPrimePolicy
 from warp.infra.config.config import ColBERTConfig
 from warp.utils.tracker import NOPTracker
 from warp.utils.utils import print_message
-from warp.engine.constants import TPrimePolicy, T_PRIME_MAX
-
-from torch.utils.cpp_extension import load
 
 
 class ParallelIndexLoaderWARP:
@@ -16,11 +17,11 @@ class ParallelIndexLoaderWARP:
         self,
         index_path,
         config: ColBERTConfig,
-        use_gpu=True,
+        use_gpu=USE_GPU,
         load_index_with_mmap=False,
         fused_decompression_merge=True,
     ):
-        assert not use_gpu and not load_index_with_mmap
+        # assert not use_gpu and not load_index_with_mmap
 
         self.index_path = index_path
         self.use_gpu = use_gpu
@@ -83,14 +84,13 @@ class ParallelIndexScorerWARP(ParallelIndexLoaderWARP):
         self,
         index_path,
         config: ColBERTConfig,
-        use_gpu=False,
+        use_gpu=USE_GPU,
         load_index_with_mmap=False,
         t_prime=None,
         bound=128,
         fused_decompression_merge=True,
     ):
-        use_gpu = False
-        assert not use_gpu
+        # assert not use_gpu
         assert not load_index_with_mmap
 
         super().__init__(
@@ -136,8 +136,8 @@ class ParallelIndexScorerWARP(ParallelIndexLoaderWARP):
         self.bound = bound or 128
 
     @classmethod
-    def try_load_torch_extensions(cls, use_gpu):
-        if hasattr(cls, "loaded_extensions") or use_gpu:
+    def try_load_torch_extensions(cls, use_gpu=USE_GPU):
+        if hasattr(cls, "loaded_extensions"):
             return
         cflags = [
             "-O3",

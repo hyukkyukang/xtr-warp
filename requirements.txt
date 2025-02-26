@@ -18,3 +18,4 @@ openvino
 optimum[openvino]
 jsonlines
 onnxruntime
+hkkang_utils

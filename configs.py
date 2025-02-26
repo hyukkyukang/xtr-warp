@@ -10,7 +10,7 @@ INPUT_LENGTH = 1024
 INDEX_ROOT = "/root/warp/indexes"
 INDEX_PATH = "/root/warp/collections/"
 COLLECTION_PATH = "/mnt/md0/hkkang/retro/data/huggingface/pints_ai/meta-llama_Llama-3.2-1B_tokenized/segment_cache_1024_0"
-DATASET_NAME = "pints_ai_half"
+DATASET_NAME = "pints_ai_debug"
 
 NBITS = 4
 K = 10
@@ -28,3 +28,7 @@ KMEANS_SAMPLE_RATE = 1.0
 
 NUM_CHUNKS_PER_ITEM = INPUT_LENGTH // CHUNK_LENGTH
 assert NUM_CHUNKS_PER_ITEM * CHUNK_LENGTH == INPUT_LENGTH
+
+
+# For Search
+USE_GPU = False
