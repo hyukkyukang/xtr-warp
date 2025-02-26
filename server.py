@@ -1,41 +1,13 @@
-from typing import List
-
+from typing import *
 from flask import Flask, jsonify, request
 
-from configs import COLLECTION_PATH, DATASET_NAME, NBITS
-from custom import CustomCollection, CustomWARPRunConfig
-from warp.engine.searcher import WARPSearcher
-
-
-class WARPSearcherServer:
-    def __init__(self, config: CustomWARPRunConfig):
-        self.config = config
-        self.__initialize_searcher()
-
-    def __initialize_searcher(self):
-        collection = CustomCollection(name=DATASET_NAME, path=COLLECTION_PATH)
-        config = CustomWARPRunConfig(
-            nbits=NBITS,
-            collection=collection,
-        )
-        self.searcher = WARPSearcher(config)
-
-    def search(self, query: str, k: int = 10):
-        return self.searcher.search(query, k)
-
-    def search_batch(self, queries: List[str], k: int = 10):
-        return self.searcher.search_all(queries, k)
-
+from warp.custom_searcher import CustomSearcher
+from configs import HOST, PORT
 
 # Initialize Flask app
 app = Flask(__name__)
 
-# Create global searcher instance
-searcher_config = CustomWARPRunConfig(
-    nbits=NBITS,
-    collection=CustomCollection(name=DATASET_NAME, path=COLLECTION_PATH),
-)
-searcher_server = WARPSearcherServer(searcher_config)
+searcher_server = CustomSearcher()
 
 
 @app.route("/search", methods=["POST"])
@@ -56,18 +28,15 @@ def search_endpoint():
 
         query = data["query"]
         k = data.get("k", 10)  # Default to 10 results if k not specified
+        return_as_text = data.get("return_as_text", False)
 
         # Perform search
-        passage_ids, ranks, scores = searcher_server.search(query, k=k)
+        global_chunk_ids: List[int] = searcher_server.search(
+            query, k=k, return_as_text=return_as_text
+        )
 
         # Format results
-        results = []
-        for pid, rank, score in zip(passage_ids, ranks, scores):
-            results.append(
-                {"passage_id": int(pid), "rank": int(rank), "score": float(score)}
-            )
-
-        return jsonify({"query": query, "results": results})
+        return jsonify({"query": query, "results": global_chunk_ids})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -81,7 +50,7 @@ def health_check():
 
 def main():
     # Run the Flask app
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host=HOST, port=PORT, debug=False)
 
 
 if __name__ == "__main__":

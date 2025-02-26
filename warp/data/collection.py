@@ -105,11 +105,9 @@ class SampledCollection:
         rank: int,
         nranks: int,
         input_length: int = INPUT_LENGTH,
-        batch_size_to_consider: int = None,
     ):
         self.dataset = dataset
         self.input_length = input_length  # Move constants to __init__
-        self.batch_size_to_consider = batch_size_to_consider
         self.rank = rank
         self.nranks = nranks
         # Calculate sample_pids for this rank once during init

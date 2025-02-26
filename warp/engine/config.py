@@ -4,6 +4,7 @@ from typing import Literal, Optional, Union
 
 from warp.modeling.xtr import DOC_MAXLEN, QUERY_MAXLEN
 from warp.infra import ColBERTConfig
+from configs import INDEX_ROOT
 
 USE_CORE_ML = False
 
@@ -49,8 +50,10 @@ class WARPRunConfig:
 
     @property
     def index_root(self):
-        INDEX_ROOT = os.environ["INDEX_ROOT"]
-        return INDEX_ROOT
+        index_root_ = (
+            os.environ["INDEX_ROOT"] if "INDEX_ROOT" in os.environ else INDEX_ROOT
+        )
+        return index_root_
 
     @property
     def index_name(self):

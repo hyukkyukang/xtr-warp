@@ -83,7 +83,7 @@ passages = [
 
 
 class CustomCollection:
-    def __init__(self, name: str, path: str, passages):
+    def __init__(self, name: str, path: str):
         self.name = name
         self.path = path
 
