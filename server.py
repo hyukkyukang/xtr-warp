@@ -1,7 +1,9 @@
-from flask import Flask, request, jsonify
+from typing import List
+
+from flask import Flask, jsonify, request
 
 from configs import COLLECTION_PATH, DATASET_NAME, NBITS
-from custom import CustomCollection, CustomWARPRunConfig, print_query
+from custom import CustomCollection, CustomWARPRunConfig
 from warp.engine.searcher import WARPSearcher
 
 
@@ -20,6 +22,9 @@ class WARPSearcherServer:
 
     def search(self, query: str, k: int = 10):
         return self.searcher.search(query, k)
+
+    def search_batch(self, queries: List[str], k: int = 10):
+        return self.searcher.search_all(queries, k)
 
 
 # Initialize Flask app

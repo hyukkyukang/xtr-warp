@@ -13,6 +13,7 @@ from warp.engine.config import WARPRunConfig
 from warp.infra import Run, RunConfig
 from warp import Searcher
 
+
 class WARPSearcher:
     def __init__(self, config: WARPRunConfig):
         self.config = config
@@ -40,26 +41,32 @@ class WARPSearcher:
         else:
             self.collection_map = None
 
-    def search_all(self, queries, k=None, batched=True, tracker=NOPTracker(), show_progress=True):
-        if batched and self.config.onnx is not None:
+    def search_all(
+        self, queries, k=None, batched=True, tracker=NOPTracker(), show_progress=True
+    ):
+        if batched and hasattr(self.config, "onnx") and self.config.onnx is not None:
             print("[WARNING] Batched search_all not implemented for ONNX Configuration")
             print("[WARNING] Falling back to batched=False")
             batched = False
         if batched:
-            return self._search_all_batched(queries, k, tracker, show_progress=show_progress)
-        return self._search_all_unbatched(queries, k, tracker, show_progress=show_progress)
+            return self._search_all_batched(queries, k, show_progress=show_progress)
+        return self._search_all_unbatched(
+            queries, k, tracker, show_progress=show_progress
+        )
 
-    def _search_all_batched(self, queries, k=None, tracker=NOPTracker(), show_progress=True):
+    def _search_all_batched(self, queries, k=None, show_progress=True):
         if k is None:
             k = self.config.k
         if isinstance(queries, WARPQueries):
             queries = queries.queries
-        ranking = self.searcher.search_all(queries, k=k, tracker=tracker, show_progress=show_progress)
+        ranking = self.searcher.search_all(queries, k=k, show_progress=show_progress)
         if self.collection_map is not None:
             ranking.apply_collection_map(self.collection_map)
         return WARPRanking(ranking)
 
-    def _search_all_unbatched(self, queries, k=None, tracker=NOPTracker(), show_progress=True):
+    def _search_all_unbatched(
+        self, queries, k=None, tracker=NOPTracker(), show_progress=True
+    ):
         if k is None:
             k = self.config.k
         results = WARPRankingItems()
