@@ -120,23 +120,7 @@ class CollectionIndexer:
         plan.json { config, num_chunks, num_partitions, num_embeddings_est, avg_doclen_est}
         num_partitions is the number of centroids to be generated.
         """
-        if self.config.resume:
-            if self._try_load_plan():
-                if self.verbose > 1:
-                    Run().print_main(f"#> Loaded plan from {self.plan_path}:")
-                    Run().print_main(f"#> num_chunks = {self.num_disk_chunks}")
-                    Run().print_main(f"#> num_partitions = {self.num_disk_chunks}")
-                    Run().print_main(
-                        f"#> num_embeddings_est = {self.num_embeddings_est}"
-                    )
-                    Run().print_main(f"#> avg_doclen_est = {self.avg_doclen_est}")
-                return
-
         self.num_disk_chunks = self.sampled_collection.total_num_disk_chunks
-
-        # Saves sampled passages and embeddings for training k-means centroids later
-        sampled_pids: List[int] = self._sample_pids()
-        self._sample_embeddings(sampled_pids)
 
         # Select the number of partitions
         num_passages: int = len(self.sampled_collection.global_sample_pids)
@@ -146,14 +130,36 @@ class CollectionIndexer:
         self.num_partitions = int(
             int(2 ** np.floor(np.log2(16 * np.sqrt(self.num_embeddings_est))))
         )
+        self.avg_doclen_est = CHUNK_LENGTH
 
         if self.verbose > 0:
             Run().print_main(f"Creating {self.num_partitions:,} partitions.")
             Run().print_main(
                 f"*Estimated* {int(self.num_embeddings_est):,} embeddings."
             )
+        # If resume, try to load the plan and check if it's valid with the current config.
+        # Otherwise, we can not resume
+        if self.config.resume:
+            loaded_plan: Dict[str, Any] = self._load_plan()
+            # Check if the plan is valid
+            assert (
+                loaded_plan["num_disk_chunks"] == self.num_disk_chunks
+            ), f"num_disk_chunks = {loaded_plan['num_disk_chunks']} != {self.num_disk_chunks}"
+            assert (
+                loaded_plan["num_partitions"] == self.num_partitions
+            ), f"num_partitions = {loaded_plan['num_partitions']} != {self.num_partitions}"
+            assert (
+                loaded_plan["num_embeddings_est"] == self.num_embeddings_est
+            ), f"num_embeddings_est = {loaded_plan['num_embeddings_est']} != {self.num_embeddings_est}"
+            assert (
+                loaded_plan["avg_doclen_est"] == self.avg_doclen_est
+            ), f"avg_doclen_est = {loaded_plan['avg_doclen_est']} != {self.avg_doclen_est}"
+        else:
+            # Saves sampled passages and embeddings for training k-means centroids later
+            sampled_pids: List[int] = self._sample_pids()
+            self._sample_embeddings(sampled_pids)
 
-        self._save_plan()
+            self._save_plan()
 
     def _sample_pids(self):
         num_chunks = self.sampled_collection.total_num_chunks
@@ -243,8 +249,6 @@ class CollectionIndexer:
             else:
                 self.num_sample_embs = torch.tensor([local_sample_embs.size(0)]).cpu()
 
-        self.avg_doclen_est = CHUNK_LENGTH
-
         logger.info(
             f"avg_doclen_est = {self.avg_doclen_est} \t len(local_sample) = {len(local_sample_embs):,}"
         )
@@ -258,32 +262,22 @@ class CollectionIndexer:
 
         return None
 
-    def _try_load_plan(self):
+    def _load_plan(self):
         config = self.config
         self.plan_path = os.path.join(config.index_path_, "plan.json")
-        if os.path.exists(self.plan_path):
-            with open(self.plan_path, "r") as f:
-                try:
-                    plan = ujson.load(f)
-                except Exception as e:
-                    return False
-                if not (
-                    "num_chunks" in plan
-                    and "num_partitions" in plan
-                    and "num_embeddings_est" in plan
-                    and "avg_doclen_est" in plan
-                ):
-                    return False
+        assert os.path.exists(
+            self.plan_path
+        ), f"plan.json does not exist at {self.plan_path}"
 
-                # TODO: Verify config matches
-                self.num_disk_chunks = plan["num_chunks"]
-                self.num_partitions = plan["num_partitions"]
-                self.num_embeddings_est = plan["num_embeddings_est"]
-                self.avg_doclen_est = plan["avg_doclen_est"]
+        with open(self.plan_path, "r") as f:
+            plan = ujson.load(f)
 
-            return True
-        else:
-            return False
+        return {
+            "num_disk_chunks": plan["num_chunks"],
+            "num_partitions": plan["num_partitions"],
+            "num_embeddings_est": plan["num_embeddings_est"],
+            "avg_doclen_est": plan["avg_doclen_est"],
+        }
 
     def _save_plan(self):
         if self.rank < 1:
@@ -495,6 +489,14 @@ class CollectionIndexer:
                 )
                 # Update the seen global indices to the latest global index
                 seen_global_indices = max(global_indices)
+                # Path to the metadata file
+                metadata_path = os.path.join(
+                    self.config.index_path_, f"{disk_chunk_id}.metadata.json"
+                )
+
+                # Check if the data is already saved in the disk
+                if self.config.resume and os.path.exists(metadata_path):
+                    continue
 
                 # Save the buffer if the disk_chunk_id has changed
                 if (
