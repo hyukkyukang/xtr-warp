@@ -10,6 +10,7 @@ from warp.engine.constants import TPrimePolicy, T_PRIME_MAX
 
 from torch.utils.cpp_extension import load
 
+
 class ParallelIndexLoaderWARP:
     def __init__(
         self,
@@ -17,7 +18,7 @@ class ParallelIndexLoaderWARP:
         config: ColBERTConfig,
         use_gpu=True,
         load_index_with_mmap=False,
-        fused_decompression_merge=True
+        fused_decompression_merge=True,
     ):
         assert not use_gpu and not load_index_with_mmap
 
@@ -86,8 +87,9 @@ class ParallelIndexScorerWARP(ParallelIndexLoaderWARP):
         load_index_with_mmap=False,
         t_prime=None,
         bound=128,
-        fused_decompression_merge=True
+        fused_decompression_merge=True,
     ):
+        use_gpu = False
         assert not use_gpu
         assert not load_index_with_mmap
 
@@ -96,7 +98,7 @@ class ParallelIndexScorerWARP(ParallelIndexLoaderWARP):
             config=config,
             use_gpu=use_gpu,
             load_index_with_mmap=load_index_with_mmap,
-            fused_decompression_merge=fused_decompression_merge
+            fused_decompression_merge=fused_decompression_merge,
         )
 
         num_threads = torch.get_num_threads()
@@ -112,15 +114,23 @@ class ParallelIndexScorerWARP(ParallelIndexLoaderWARP):
             self.t_prime = TPrimePolicy(value=t_prime)
         elif num_centroids <= 2**16:
             (num_embeddings, _) = self.residuals_compacted.shape
-            self.t_prime = TPrimePolicy(value=int(np.sqrt(8 * num_embeddings) / 1000) * 1000)
-        else: self.t_prime = T_PRIME_MAX
+            self.t_prime = TPrimePolicy(
+                value=int(np.sqrt(8 * num_embeddings) / 1000) * 1000
+            )
+        else:
+            self.t_prime = T_PRIME_MAX
 
         assert config.nbits in [2, 4]
         self.nbits = config.nbits
 
-        self.centroid_idx = torch.stack(tuple([
-            torch.arange(num_centroids, dtype=torch.int32) for _ in range(num_threads)
-        ])).contiguous()
+        self.centroid_idx = torch.stack(
+            tuple(
+                [
+                    torch.arange(num_centroids, dtype=torch.int32)
+                    for _ in range(num_threads)
+                ]
+            )
+        ).contiguous()
 
         print("nprobe", self.nprobe, "t_prime", self.t_prime, "nbits", config.nbits)
         self.bound = bound or 128
@@ -130,9 +140,25 @@ class ParallelIndexScorerWARP(ParallelIndexLoaderWARP):
         if hasattr(cls, "loaded_extensions") or use_gpu:
             return
         cflags = [
-            "-O3", "-mavx2", "-mfma", "-march=native", "-ffast-math", "-fno-math-errno", "-m64", "-fopenmp", "-std=c++17",
-            "-funroll-loops", "-msse", "-msse2", "-msse3", "-msse4.1", "-mbmi2", "-mmmx", "-mavx", "-fomit-frame-pointer",
-            "-fno-strict-aliasing"
+            "-O3",
+            "-mavx2",
+            "-mfma",
+            "-march=native",
+            "-ffast-math",
+            "-fno-math-errno",
+            "-m64",
+            "-fopenmp",
+            "-std=c++17",
+            "-funroll-loops",
+            "-msse",
+            "-msse2",
+            "-msse3",
+            "-msse4.1",
+            "-mbmi2",
+            "-mmmx",
+            "-mavx",
+            "-fomit-frame-pointer",
+            "-fno-strict-aliasing",
         ]
 
         print_message(
@@ -165,8 +191,12 @@ class ParallelIndexScorerWARP(ParallelIndexLoaderWARP):
             extra_cflags=cflags,
             verbose=os.getenv("WARP_LOAD_TORCH_EXTENSION_VERBOSE", "False") == "True",
         )
-        cls.decompress_centroids_cpp[2] = decompress_centroids_cpp.parallel_decompress_centroids_2_cpp
-        cls.decompress_centroids_cpp[4] = decompress_centroids_cpp.parallel_decompress_centroids_4_cpp
+        cls.decompress_centroids_cpp[2] = (
+            decompress_centroids_cpp.parallel_decompress_centroids_2_cpp
+        )
+        cls.decompress_centroids_cpp[4] = (
+            decompress_centroids_cpp.parallel_decompress_centroids_4_cpp
+        )
 
         print_message(
             f"Loading parallel_merge_candidate_scores_cpp extension (set WARP_LOAD_TORCH_EXTENSION_VERBOSE=True for more info)..."
@@ -198,8 +228,12 @@ class ParallelIndexScorerWARP(ParallelIndexLoaderWARP):
             extra_cflags=cflags,
             verbose=os.getenv("WARP_LOAD_TORCH_EXTENSION_VERBOSE", "False") == "True",
         )
-        cls.fused_decompress_merge_cpp[2] = fused_decompress_merge_cpp.parallel_fused_decompress_merge_2_cpp
-        cls.fused_decompress_merge_cpp[4] = fused_decompress_merge_cpp.parallel_fused_decompress_merge_4_cpp
+        cls.fused_decompress_merge_cpp[2] = (
+            fused_decompress_merge_cpp.parallel_fused_decompress_merge_2_cpp
+        )
+        cls.fused_decompress_merge_cpp[4] = (
+            fused_decompress_merge_cpp.parallel_fused_decompress_merge_4_cpp
+        )
 
         cls.loaded_extensions = True
 
@@ -226,19 +260,33 @@ class ParallelIndexScorerWARP(ParallelIndexLoaderWARP):
 
                 tracker.begin("Build Matrix")
                 pids, scores = self._fused_decompress_merge_scores(
-                    Q.squeeze(0), cells, centroid_scores, self.nprobe, num_tokens, mse_estimates, k
+                    Q.squeeze(0),
+                    cells,
+                    centroid_scores,
+                    self.nprobe,
+                    num_tokens,
+                    mse_estimates,
+                    k,
                 )
                 tracker.end("Build Matrix")
             else:
                 tracker.begin("Decompression")
-                capacities, candidate_sizes, candidate_pids, candidate_scores = self._decompress_centroids(
-                    Q.squeeze(0), cells, centroid_scores, self.nprobe, num_tokens
+                capacities, candidate_sizes, candidate_pids, candidate_scores = (
+                    self._decompress_centroids(
+                        Q.squeeze(0), cells, centroid_scores, self.nprobe, num_tokens
+                    )
                 )
                 tracker.end("Decompression")
 
                 tracker.begin("Build Matrix")
                 pids, scores = self._merge_candidate_scores(
-                    capacities, candidate_sizes, candidate_pids, candidate_scores, mse_estimates, k, num_tokens
+                    capacities,
+                    candidate_sizes,
+                    candidate_pids,
+                    candidate_scores,
+                    mse_estimates,
+                    k,
+                    num_tokens,
                 )
                 tracker.end("Build Matrix")
 
@@ -246,14 +294,20 @@ class ParallelIndexScorerWARP(ParallelIndexLoaderWARP):
 
     def _warp_select_centroids(self, Q_mask, centroid_scores, nprobe, t_prime):
         cells, scores, mse = ParallelIndexScorerWARP.warp_select_centroids_cpp(
-            self.centroid_idx, Q_mask, centroid_scores, self.sizes_compacted, nprobe, t_prime, self.bound
+            self.centroid_idx,
+            Q_mask,
+            centroid_scores,
+            self.sizes_compacted,
+            nprobe,
+            t_prime,
+            self.bound,
         )
 
         cells = cells.flatten().contiguous()
         scores = scores.flatten().contiguous()
 
         # NOTE Skip decompression of cells with a zero score centroid.
-        # This means that the corresponding query token was 0.0 (i.e., masked out). 
+        # This means that the corresponding query token was 0.0 (i.e., masked out).
         cells[scores == 0] = self.kdummy_centroid
 
         return cells, scores, mse
@@ -266,17 +320,41 @@ class ParallelIndexScorerWARP(ParallelIndexLoaderWARP):
         ends = self.offsets_compacted[centroid_ids + 1]
 
         capacities = ends - begins
-        sizes, pids, scores = ParallelIndexScorerWARP.decompress_centroids_cpp[self.nbits](
-            begins, ends, capacities, centroid_scores, self.codes_compacted,
-            self.residuals_compacted, self.bucket_weights, Q, nprobe, num_tokens
+        sizes, pids, scores = ParallelIndexScorerWARP.decompress_centroids_cpp[
+            self.nbits
+        ](
+            begins,
+            ends,
+            capacities,
+            centroid_scores,
+            self.codes_compacted,
+            self.residuals_compacted,
+            self.bucket_weights,
+            Q,
+            nprobe,
+            num_tokens,
         )
         return capacities, sizes, pids, scores
 
     def _merge_candidate_scores(
-        self, capacities, candidate_sizes, candidate_pids, candidate_scores, mse_estimates, k, num_tokens
+        self,
+        capacities,
+        candidate_sizes,
+        candidate_pids,
+        candidate_scores,
+        mse_estimates,
+        k,
+        num_tokens,
     ):
         pids, scores = ParallelIndexScorerWARP.merge_candidate_scores_cpp(
-            capacities, candidate_sizes, candidate_pids, candidate_scores, mse_estimates, self.nprobe, k, num_tokens
+            capacities,
+            candidate_sizes,
+            candidate_pids,
+            candidate_scores,
+            mse_estimates,
+            self.nprobe,
+            k,
+            num_tokens,
         )
         return pids.tolist(), scores.tolist()
 
@@ -289,8 +367,17 @@ class ParallelIndexScorerWARP(ParallelIndexLoaderWARP):
 
         capacities = ends - begins
         pids, scores = ParallelIndexScorerWARP.fused_decompress_merge_cpp[self.nbits](
-            begins, ends, capacities, centroid_scores, self.codes_compacted,
-            self.residuals_compacted, self.bucket_weights, Q, nprobe, num_tokens,
-            mse_estimates, k
+            begins,
+            ends,
+            capacities,
+            centroid_scores,
+            self.codes_compacted,
+            self.residuals_compacted,
+            self.bucket_weights,
+            Q,
+            nprobe,
+            num_tokens,
+            mse_estimates,
+            k,
         )
         return pids.tolist(), scores.tolist()

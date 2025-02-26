@@ -11,7 +11,6 @@ from configs import (
     NBITS,
     NRANKS,
     NUM_WORKERS,
-    K,
     RESUME,
 )
 from custom import CustomWARPRunConfig, construct_index
