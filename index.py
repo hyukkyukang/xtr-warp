@@ -2,7 +2,6 @@ import logging
 import os
 
 import hkkang_utils.misc as misc_utils
-from datasets import Dataset
 
 from configs import (
     BATCH_SIZE,
@@ -16,6 +15,8 @@ from configs import (
     RESUME,
 )
 from custom import CustomWARPRunConfig, construct_index
+
+logger = logging.getLogger("Indexing")
 
 
 class CustomCollection:
@@ -41,10 +42,7 @@ def main():
     # Construct an index over the provided collection.
     construct_index(config)
 
-    print("Done!")
-
-    # dataset = Dataset.load_from_disk("data/retrieval_dataset")
-    # print(dataset)
+    logger.info("Done!")
 
 
 if __name__ == "__main__":

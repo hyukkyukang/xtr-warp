@@ -1,6 +1,7 @@
+import gc
+import logging
 import os
 import random
-import time
 
 import torch
 import tqdm
@@ -10,6 +11,7 @@ try:
     import faiss
 except ImportError as e:
     print("WARNING: faiss must be imported for indexing")
+from functools import partial
 from typing import *
 
 import numpy as np
@@ -17,6 +19,12 @@ import torch.multiprocessing as mp
 from torch.utils.data import DataLoader
 
 import warp.utils.distributed as distributed
+from configs import (
+    CHUNK_LENGTH,
+    COLLECTION_SAMPLE_RATE,
+    INPUT_LENGTH,
+    KMEANS_SAMPLE_RATE,
+)
 from warp.data.collection import (
     Collection,
     SampledCollection,
@@ -32,7 +40,8 @@ from warp.infra.launcher import print_memory_stats
 from warp.infra.run import Run
 from warp.modeling.checkpoint import Checkpoint
 from warp.utils.utils import print_message
-from configs import CHUNK_LENGTH, INPUT_LENGTH
+
+logger = logging.getLogger("CollectionIndexer")
 
 
 def encode(config, collection, shared_lists, shared_queues, verbose: int = 3):
@@ -64,7 +73,26 @@ class CollectionIndexer:
         self.encoder = CollectionEncoder(config, self.checkpoint)
         self.saver = IndexSaver(config)
 
+        # Create SampledCollection
+        self.sampled_collection = self._create_sampled_collection()
+
         print_memory_stats(f"RANK:{self.rank}")
+
+    def _create_sampled_collection(self) -> SampledCollection:
+        sampled_collection = SampledCollection(
+            dataset=self.collection._data,
+            sample_pids=range(
+                int(len(self.collection._data) * COLLECTION_SAMPLE_RATE)
+            ),  # Use all pids
+            rank=self.rank,
+            nranks=self.nranks,
+            batch_size_to_consider=self.encoder.batch_size,
+        )
+        assert sampled_collection.is_valid_batch_size(
+            self.encoder.batch_size
+        ), f"Batch size {self.encoder.batch_size} is not valid for the sampled collection. disk chunk size = {sampled_collection.get_disk_chunk_size()}"
+
+        return sampled_collection
 
     def run(self, shared_lists):
         with torch.inference_mode():
@@ -96,24 +124,22 @@ class CollectionIndexer:
             if self._try_load_plan():
                 if self.verbose > 1:
                     Run().print_main(f"#> Loaded plan from {self.plan_path}:")
-                    Run().print_main(f"#> num_chunks = {self.num_chunks}")
-                    Run().print_main(f"#> num_partitions = {self.num_chunks}")
+                    Run().print_main(f"#> num_chunks = {self.num_disk_chunks}")
+                    Run().print_main(f"#> num_partitions = {self.num_disk_chunks}")
                     Run().print_main(
                         f"#> num_embeddings_est = {self.num_embeddings_est}"
                     )
                     Run().print_main(f"#> avg_doclen_est = {self.avg_doclen_est}")
                 return
 
-        self.num_chunks = int(
-            np.ceil(len(self.collection) / self.collection.get_chunksize())
-        )
+        self.num_disk_chunks = self.sampled_collection.total_num_disk_chunks
 
         # Saves sampled passages and embeddings for training k-means centroids later
         sampled_pids: List[int] = self._sample_pids()
         self._sample_embeddings(sampled_pids)
 
         # Select the number of partitions
-        num_passages: int = len(self.collection)
+        num_passages: int = len(self.sampled_collection.global_sample_pids)
         num_chunks_per_pid: int = INPUT_LENGTH // CHUNK_LENGTH
         num_chunks: int = num_passages * num_chunks_per_pid
         self.num_embeddings_est: int = num_chunks * CHUNK_LENGTH
@@ -130,20 +156,32 @@ class CollectionIndexer:
         self._save_plan()
 
     def _sample_pids(self):
-        num_passages = len(self.collection)
+        num_chunks = self.sampled_collection.total_num_chunks
+        num_passages = len(self.sampled_collection.global_sample_pids)
+        num_chunks_per_pid = INPUT_LENGTH // CHUNK_LENGTH
 
         # Simple alternative: < 100k: 100%, < 1M: 15%, < 10M: 7%, < 100M: 3%, > 100M: 1%
         # Keep in mind that, say, 15% still means at least 100k.
         # So the formula is max(100% * min(total, 100k), 15% * min(total, 1M), ...)
         # Then we subsample the vectors to 100 * num_partitions
 
-        typical_doclen = 120  # let's keep sampling independent of the actual doc_maxlen
-        sampled_pids = 16 * np.sqrt(typical_doclen * num_passages)
+        typical_doclen = CHUNK_LENGTH
+        sample_num: int = int(16 * np.sqrt(typical_doclen * num_chunks))
         # sampled_pids = int(2 ** np.floor(np.log2(1 + sampled_pids)))
-        sampled_pids = min(1 + int(sampled_pids), num_passages)
-        sampled_pids = int(sampled_pids * 0.02)
+        # Convert to number of passages required to sample
+        sample_num = int(sample_num / num_chunks_per_pid)
+        # Subsample the passages (Due to computational cost)
+        sample_num = int(sample_num * KMEANS_SAMPLE_RATE)
+        sample_num = min(1 + sample_num, num_passages)
+        # The sample number should be bigger than disk chunk size
+        sample_num = max(sample_num, self.sampled_collection.get_disk_chunk_size())
+        assert sample_num >= self.sampled_collection.get_disk_chunk_size(), (
+            f"num_passages = {sample_num} must be greater than or equal to "
+            f"disk_chunk_size = {self.sampled_collection.get_disk_chunk_size()}"
+        )
 
-        sampled_pids = random.sample(range(num_passages), sampled_pids)
+        logger.info(f"num_passages = {num_passages}, sample_num = {sample_num}")
+        sampled_pids = random.sample(range(num_passages), sample_num)
         if self.verbose > 1:
             Run().print_main(
                 f"# of sampled PIDs = {len(sampled_pids)} \t sampled_pids[:3] = {sampled_pids[:3]}"
@@ -178,10 +216,15 @@ class CollectionIndexer:
             total=len(collection_dataloader),
             desc="Encoding samples",
         ):
-            token_ids, attention_mask, doclens = batch
+            # Get batch data
+            token_ids = batch["input_ids"]
+            attention_mask = batch["attention_mask"]
+            doclens = batch["doc_lens"]
+            # Encode
             local_sample_embs = self.encoder.encode_from_token_ids(
                 token_ids, attention_mask
             )
+            # Append
             all_embs.append(local_sample_embs)
             all_doclens.extend(doclens)
 
@@ -202,8 +245,8 @@ class CollectionIndexer:
 
         self.avg_doclen_est = CHUNK_LENGTH
 
-        Run().print(
-            f"avg_doclen_est = {self.avg_doclen_est} \t len(local_sample) = {len(sampled_pids):,}"
+        logger.info(
+            f"avg_doclen_est = {self.avg_doclen_est} \t len(local_sample) = {len(local_sample_embs):,}"
         )
         path = os.path.join(self.config.index_path_, f"sample.{self.rank}.pt")
         torch.save(
@@ -233,7 +276,7 @@ class CollectionIndexer:
                     return False
 
                 # TODO: Verify config matches
-                self.num_chunks = plan["num_chunks"]
+                self.num_disk_chunks = plan["num_chunks"]
                 self.num_partitions = plan["num_partitions"]
                 self.num_embeddings_est = plan["num_embeddings_est"]
                 self.avg_doclen_est = plan["avg_doclen_est"]
@@ -246,11 +289,11 @@ class CollectionIndexer:
         if self.rank < 1:
             config = self.config
             self.plan_path = os.path.join(config.index_path_, "plan.json")
-            Run().print("#> Saving the indexing plan to", self.plan_path, "..")
+            logger.info("#> Saving the indexing plan to", self.plan_path, "..")
 
             with open(self.plan_path, "w") as f:
                 d = {"config": config.export()}
-                d["num_chunks"] = self.num_chunks
+                d["num_chunks"] = self.num_disk_chunks
                 d["num_partitions"] = self.num_partitions
                 d["num_embeddings_est"] = self.num_embeddings_est
                 d["avg_doclen_est"] = self.avg_doclen_est
@@ -371,7 +414,7 @@ class CollectionIndexer:
             heldout_avg_residual = heldout - heldout_reconstruct
 
         avg_residual = torch.abs(heldout_avg_residual).mean(dim=0).cpu()
-        print([round(x, 3) for x in avg_residual.squeeze().tolist()])
+        logger.info([round(x, 3) for x in avg_residual.squeeze().tolist()])
 
         num_options = 2**self.config.nbits
         quantiles = torch.arange(0, num_options, device=heldout_avg_residual.device) * (
@@ -410,33 +453,87 @@ class CollectionIndexer:
             {CHUNK#}.residuals.pt:  16-bits residual for each embedding in chunk
             doclens.{CHUNK#}.pt:    number of embeddings within each passage in chunk
         """
-        with self.saver.thread():
-            batches = self.collection.enumerate_batches(rank=self.rank)
-            for chunk_idx, offset, passages in tqdm.tqdm(
-                batches, disable=self.rank > 0
-            ):
-                if self.config.resume and self.saver.check_chunk_exists(chunk_idx):
-                    if self.verbose > 2:
-                        Run().print_main(
-                            f"#> Found chunk {chunk_idx} in the index already, skipping encoding..."
-                        )
-                    continue
-                # Encode passages into embeddings with the checkpoint model
-                embs, doclens = self.encoder.encode_passages(passages)
-                if self.use_gpu:
-                    assert embs.dtype == torch.float32
-                else:
-                    assert embs.dtype == torch.float32
-                if self.verbose > 1:
-                    Run().print_main(
-                        f"#> Saving chunk {chunk_idx}: \t {len(passages):,} passages "
-                        f"and {embs.size(0):,} embeddings. From #{offset:,} onward."
-                    )
+        collate_fn = partial(
+            collate_fn_with_worker_tokenizers,
+            check_disk_chunk_id=True,
+            tokenizers=[
+                self.collection.src_tokenizer,
+                self.collection.tgt_tokenizer,
+            ],
+        )
 
+        # Create dataloader with worker initialization
+        collection_dataloader = DataLoader(
+            self.sampled_collection,
+            batch_size=self.encoder.batch_size,
+            num_workers=0,
+            worker_init_fn=worker_init_fn,
+            collate_fn=collate_fn,
+        )
+
+        embs_buffer: List[torch.Tensor] = []
+        doclens_buffer: List[int] = []
+        disk_chunk_ids_buffer: Optional[int] = None
+        offset: int | None = None
+        seen_global_indices: int = -1
+        with self.saver.thread():
+            for batch in tqdm.tqdm(
+                collection_dataloader,
+                disable=self.rank > 0,
+                total=len(collection_dataloader),
+                desc="Encoding text chunks",
+            ):
+                input_ids = batch["input_ids"]
+                attention_mask = batch["attention_mask"]
+                doclens = batch["doc_lens"]
+                disk_chunk_id = batch["disk_chunk_id"]
+                global_indices = batch["global_indices"]
+                # Check for debugging purposes
+                assert seen_global_indices < min(global_indices), (
+                    seen_global_indices,
+                    min(global_indices),
+                )
+                # Update the seen global indices to the latest global index
+                seen_global_indices = max(global_indices)
+
+                # Save the buffer if the disk_chunk_id has changed
+                if (
+                    disk_chunk_ids_buffer is not None
+                    and disk_chunk_id != disk_chunk_ids_buffer
+                ):
+                    self.saver.save_chunk(
+                        disk_chunk_ids_buffer,
+                        offset,
+                        torch.cat(embs_buffer, dim=0),
+                        doclens_buffer,
+                    )
+                    embs_buffer = []
+                    doclens_buffer = []
+                    disk_chunk_ids_buffer = None
+                    offset = None
+                    # Free memory
+                    gc.collect()
+                    torch.cuda.empty_cache()
+
+                # Conduct the encoding
+                embs = self.encoder.encode_from_token_ids(input_ids, attention_mask)
+                assert embs.dtype == torch.float32
+                # Save to the buffer
+                embs_buffer.append(embs)
+                doclens_buffer.extend(doclens)
+                disk_chunk_ids_buffer = disk_chunk_id
+                # Set the offset if it's not set
+                if offset is None:
+                    offset = global_indices[0]
+
+            # Save the remaining buffer
+            if disk_chunk_ids_buffer is not None:
                 self.saver.save_chunk(
-                    chunk_idx, offset, embs, doclens
-                )  # offset = first passage index in chunk
-                del embs, doclens
+                    disk_chunk_ids_buffer,
+                    offset,
+                    torch.cat(embs_buffer, dim=0),
+                    doclens_buffer,
+                )
 
     def finalize(self):
         """
@@ -463,7 +560,7 @@ class CollectionIndexer:
         if self.verbose > 1:
             Run().print_main("#> Checking all files were saved...")
         success = True
-        for chunk_idx in range(self.num_chunks):
+        for chunk_idx in range(self.num_disk_chunks):
             if not self.saver.check_chunk_exists(chunk_idx):
                 success = False
                 Run().print_main(f"#> ERROR: Could not find chunk {chunk_idx}!")
@@ -478,7 +575,7 @@ class CollectionIndexer:
 
         self.embedding_offsets = []
 
-        for chunk_idx in range(self.num_chunks):
+        for chunk_idx in range(self.num_disk_chunks):
             metadata_path = os.path.join(
                 self.config.index_path_, f"{chunk_idx}.metadata.json"
             )
@@ -502,7 +599,7 @@ class CollectionIndexer:
                 f.write(ujson.dumps(chunk_metadata, indent=4) + "\n")
 
         self.num_embeddings = embedding_offset
-        assert len(self.embedding_offsets) == self.num_chunks
+        assert len(self.embedding_offsets) == self.num_disk_chunks
 
     def _build_ivf(self):
         # Maybe we should several small IVFs? Every 250M embeddings, so that's every 1 GB.
@@ -523,7 +620,7 @@ class CollectionIndexer:
         if self.verbose > 1:
             Run().print_main("#> Loading codes...")
 
-        for chunk_idx in tqdm.tqdm(range(self.num_chunks)):
+        for chunk_idx in tqdm.tqdm(range(self.num_disk_chunks)):
             offset = self.embedding_offsets[chunk_idx]
             chunk_codes = ResidualCodec.Embeddings.load_codes(
                 self.config.index_path_, chunk_idx
@@ -562,11 +659,11 @@ class CollectionIndexer:
         config = self.config
         self.metadata_path = os.path.join(config.index_path_, "metadata.json")
         if self.verbose > 1:
-            Run().print("#> Saving the indexing metadata to", self.metadata_path, "..")
+            logger.info("#> Saving the indexing metadata to", self.metadata_path, "..")
 
         with open(self.metadata_path, "w") as f:
             d = {"config": config.export()}
-            d["num_chunks"] = self.num_chunks
+            d["num_chunks"] = self.num_disk_chunks
             d["num_partitions"] = self.num_partitions
             d["num_embeddings"] = self.num_embeddings
             d["avg_doclen"] = self.num_embeddings / len(self.collection)

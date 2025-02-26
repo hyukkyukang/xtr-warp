@@ -3,17 +3,27 @@
 # Just need to use a datastructure that shares things across processes without too much pickling.
 # I think multiprocessing.Manager can do that!
 
+import logging
 import os
+from functools import cached_property
 from typing import *
 
 import torch
 from datasets import Dataset
 from transformers import AutoTokenizer
 
+from configs import (
+    CHUNK_LENGTH,
+    INPUT_LENGTH,
+    NUM_CHUNKS_PER_ITEM,
+    SRC_TOKENIZER_NAME,
+    TGT_TOKENIZER_NAME,
+)
 from warp.evaluation.loaders import load_collection
 from warp.infra.run import Run
 from warp.tokenizer import call_autotokenizer_with_hf_token
-from configs import SRC_TOKENIZER_NAME, TGT_TOKENIZER_NAME, CHUNK_LENGTH, INPUT_LENGTH
+
+logger = logging.getLogger("Collection")
 
 
 # Define worker initialization function
@@ -32,20 +42,33 @@ def worker_init_fn(worker_id):
 
 
 # Define collate function that uses worker's tokenizers
-def collate_fn_with_worker_tokenizers(batch):
+def collate_fn_with_worker_tokenizers(
+    batch,
+    check_disk_chunk_id: bool = False,
+    tokenizers: Tuple[AutoTokenizer, AutoTokenizer] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, List[int], int]:
+    if check_disk_chunk_id:
+        # Check that all items in the batch have the same disk chunk id
+        disk_chunk_ids = [item["disk_chunk_id"] for item in batch]
+        # TODO: Bug here...
+        assert len(set(disk_chunk_ids)) == 1, f"disk_chunk_ids = {disk_chunk_ids}"
+        disk_chunk_id = disk_chunk_ids[0]
+    else:
+        disk_chunk_id = None
+
     # Get worker info and tokenizers
     worker_info = torch.utils.data.get_worker_info()
 
     # Use that worker's tokenizers
-    src_tokenizer = worker_info.dataset.src_tokenizer
-    tgt_tokenizer = worker_info.dataset.tgt_tokenizer
-
-    # Process batch using appropriate tokenizers
-    input_ids = batch  # Assuming batch is already a list of input_ids
+    if tokenizers is None:
+        src_tokenizer = worker_info.dataset.src_tokenizer
+        tgt_tokenizer = worker_info.dataset.tgt_tokenizer
+    else:
+        src_tokenizer, tgt_tokenizer = tokenizers
 
     # Divide into chunks
     chunks = []
-    for batch_item in input_ids:
+    for batch_item in [item["input_ids"] for item in batch]:
         for i in range(0, len(batch_item), CHUNK_LENGTH):
             chunks.append(batch_item[i : i + CHUNK_LENGTH])
 
@@ -63,40 +86,152 @@ def collate_fn_with_worker_tokenizers(batch):
     attention_mask = tgt_outputs["attention_mask"]
     doc_lens = torch.sum(attention_mask, dim=1).tolist()
 
-    return tgt_texts, attention_mask, doc_lens
+    global_indices = [item["global_idx"] for item in batch]
+
+    return {
+        "global_indices": global_indices,
+        "disk_chunk_id": disk_chunk_id,
+        "input_ids": tgt_texts,
+        "attention_mask": attention_mask,
+        "doc_lens": doc_lens,
+    }
 
 
 class SampledCollection:
     def __init__(
         self,
         dataset: Dataset,
-        sample_pids: List[int],
+        sample_pids: range,
         rank: int,
         nranks: int,
         input_length: int = INPUT_LENGTH,
+        batch_size_to_consider: int = None,
     ):
         self.dataset = dataset
         self.input_length = input_length  # Move constants to __init__
-
+        self.batch_size_to_consider = batch_size_to_consider
+        self.rank = rank
+        self.nranks = nranks
         # Calculate sample_pids for this rank once during init
-        num_item_per_rank = len(sample_pids) // nranks
-        self.sample_pids = sample_pids[
-            rank * num_item_per_rank : (rank + 1) * num_item_per_rank
-        ]
+        self._sampled_pids = self._make_total_num_items_divisible(sample_pids)
+
+    @cached_property
+    def global_sample_pids(self):
+        """This is the list of pids that will be sampled from the dataset.
+        This is the same for all ranks."""
+        return list(self._sampled_pids)
+
+    @cached_property
+    def local_sample_pids(self):
+        """This is the list of pids that will be sampled from the dataset.
+        This is different for each rank."""
+        start_idx = self.rank * self.num_item_per_rank
+        end_idx = start_idx + self.num_item_per_rank
+        return self.global_sample_pids[start_idx:end_idx]
+
+    @cached_property
+    def num_item_per_rank(self):
+        assert self.get_disk_chunk_size() > self.nranks, (
+            f"disk_chunk_size = {self.get_disk_chunk_size()} must be greater than "
+            f"nranks = {self.nranks}"
+        )
+        assert self.get_disk_chunk_size() % self.nranks == 0, (
+            f"disk_chunk_size = {self.get_disk_chunk_size()} must be divisible by "
+            f"nranks = {self.nranks}"
+        )
+        assert len(self._sampled_pids) % self.get_disk_chunk_size() == 0, (
+            f"len(self._sampled_pids) = {len(self._sampled_pids)} must be divisible by "
+            f"get_disk_chunk_size() = {self.get_disk_chunk_size()}"
+        )
+        # Calculate the number of samples per rank
+        num_sample_per_rank = len(self._sampled_pids) // self.nranks
+        return num_sample_per_rank
+
+    @property
+    def total_num_disk_chunks(self):
+        """Disk chunks describes the partition of the data saved in the disk."""
+        assert len(self._sampled_pids) % self.get_disk_chunk_size() == 0, (
+            f"len(self._sampled_pids) = {len(self._sampled_pids)} must be divisible by "
+            f"get_disk_chunk_size() = {self.get_disk_chunk_size()}"
+        )
+        return len(self._sampled_pids) // self.get_disk_chunk_size()
+
+    @property
+    def total_num_chunks(self):
+        """Chunks describes text chunk (passage in terms of MSMARCO) that is saved in the memory."""
+        num_of_chunks_in_a_pid = self.input_length // CHUNK_LENGTH
+        return len(self._sampled_pids) * num_of_chunks_in_a_pid
 
     def __iter__(self):
-        for pid in self.sample_pids:
-            dataset = self.dataset[pid]["input_ids"]
-            assert len(dataset) == self.input_length, f"len(dataset) = {len(dataset)}"
-            yield dataset
+        for pid in self.local_sample_pids:
+            input_ids = self.dataset[pid]["input_ids"]
+            assert (
+                len(input_ids) == self.input_length
+            ), f"len(input_ids) = {len(input_ids)}"
+            # Append global idx and disk chunk id to the dataset
+            yield {
+                "global_idx": self.get_global_idx(pid) * NUM_CHUNKS_PER_ITEM,
+                "disk_chunk_id": self.get_disk_chunk_id(pid),
+                "input_ids": input_ids,
+            }
 
-    def __getitem__(self, item):
-        dataset = self.dataset[self.sample_pids[item]]["input_ids"]
-        assert len(dataset) == self.input_length, f"len(dataset) = {len(dataset)}"
-        return dataset
+    def __getitem__(self, idx: int):
+        input_ids = self.dataset[self.local_sample_pids[idx]]["input_ids"]
+        assert len(input_ids) == self.input_length, f"len(input_ids) = {len(input_ids)}"
+        return {
+            "global_idx": self.get_global_idx(idx) * NUM_CHUNKS_PER_ITEM,
+            "disk_chunk_id": self.get_disk_chunk_id(idx),
+            "input_ids": input_ids,
+        }
 
-    def __len__(self):
-        return len(self.sample_pids)
+    def __len__(self) -> int:
+        return len(self.local_sample_pids)
+
+    def _make_total_num_items_divisible(self, sampled_pids):
+        """Remove the last part of the data so that the total number of items is divisible by
+        the multiple of nranks and disk_chunk_size.
+        Meanwhile, disk_chunk_size must be divisible by batch_size_to_consider."""
+        multiple_of_nranks_and_disk_chunk_size = (
+            self.get_disk_chunk_size() * self.nranks
+        )
+        end_idx = (
+            len(sampled_pids) // multiple_of_nranks_and_disk_chunk_size
+        ) * multiple_of_nranks_and_disk_chunk_size
+        assert (
+            end_idx > 0
+        ), f"end_idx = {end_idx} must be greater than 0. len(sampled_pids) = {len(sampled_pids)}. multiple_of_nranks_and_disk_chunk_size = {multiple_of_nranks_and_disk_chunk_size}"
+        logger.info(
+            f"Cutting the last {len(sampled_pids) - end_idx} items. Before: {len(sampled_pids)}, After: {end_idx}"
+        )
+        return sampled_pids[:end_idx]
+
+    def get_global_idx(self, idx: int) -> int:
+        """
+        Get the global index of the item at index idx in the local sample pids.
+        """
+        return self.local_sample_pids[idx]
+
+    def get_disk_chunk_id(self, idx: int) -> int:
+        """
+        Get the disk chunk id of the item at index idx in the local sample pids.
+        """
+        disk_chunk_id = self.get_global_idx(idx) // self.get_disk_chunk_size()
+        return disk_chunk_id
+
+    def is_valid_batch_size(self, batch_size: int) -> bool:
+        """
+        Check if the batch size is valid:
+        Whether the disk chunk size is divisible by the batch size.
+        This is for processing the items in batches.
+        """
+        return self.get_disk_chunk_size() % batch_size == 0
+
+    def get_disk_chunk_size(self):
+        num_of_chunks_in_a_pid = INPUT_LENGTH // CHUNK_LENGTH
+        return 25_600 // num_of_chunks_in_a_pid
+        # return min(
+        #     25_000, 1 + len(self) // Run().nranks
+        # )  # 25k is great, 10k allows things to reside on GPU??
 
 
 class Collection:
@@ -169,7 +304,7 @@ class Collection:
     def enumerate_batches(self, rank, chunksize=None):
         assert rank is not None, "TODO: Add support for the rank=None case."
 
-        chunksize = chunksize or self.get_chunksize()
+        chunksize = chunksize or self.get_disk_chunk_size()
         data_length = len(self)
 
         total_ranks = Run().nranks
@@ -193,7 +328,7 @@ class Collection:
     def enumerate_indices_batches(self, rank):
         assert rank is not None, "TODO: Add support for the rank=None case."
 
-        chunksize = self.get_chunksize()
+        chunksize = self.get_disk_chunk_size()
         data_length = len(self)
 
         total_ranks = Run().nranks
@@ -205,7 +340,7 @@ class Collection:
             chunk_end = min(chunk_start + chunksize, loop_end_offset)
             yield range(chunk_start, chunk_end)
 
-    def get_chunksize(self):
+    def get_disk_chunk_size(self):
         return min(
             25_000, 1 + len(self) // Run().nranks
         )  # 25k is great, 10k allows things to reside on GPU??

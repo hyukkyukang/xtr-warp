@@ -17,3 +17,12 @@ NRANKS = torch.cuda.device_count()
 BATCH_SIZE = 8
 NUM_WORKERS = 2
 RESUME = False
+
+
+# This is the rate of the collection that will be used
+COLLECTION_SAMPLE_RATE = 0.01
+# This is the rate of the collection that will be used for kmeans sampling
+KMEANS_SAMPLE_RATE = 1.0
+
+NUM_CHUNKS_PER_ITEM = INPUT_LENGTH // CHUNK_LENGTH
+assert NUM_CHUNKS_PER_ITEM * CHUNK_LENGTH == INPUT_LENGTH

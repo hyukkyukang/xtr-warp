@@ -3,7 +3,7 @@ from multiprocessing import freeze_support
 
 import torch
 
-from configs import DATASET_NAME
+from configs import DATASET_NAME, INDEX_PATH, INDEX_ROOT, NBITS
 from warp.engine.config import WARPRunConfig
 from warp.engine.searcher import WARPSearcher
 from warp.engine.utils.collection_indexer import index
@@ -86,11 +86,6 @@ class CustomCollection:
     def __init__(self, name: str, path: str, passages):
         self.name = name
         self.path = path
-        # os.makedirs(os.path.dirname(path), exist_ok=True)
-        # with open(path, "w") as file:
-        #     file.writelines(
-        #         [f"{pid}\t{passage}\n" for pid, passage in enumerate(passages)]
-        #     )
 
 
 def construct_index(config: WARPRunConfig):
@@ -107,17 +102,17 @@ def print_query(searcher: WARPSearcher, query: str):
 
 
 if __name__ == "__main__":
-    os.environ["INDEX_ROOT"] = os.path.expanduser("/root/warp/indexes")
+    os.environ["INDEX_ROOT"] = INDEX_ROOT
     freeze_support()
     torch.set_num_threads(1)
 
     # Define the collection (i.e., list of passages)
-    collection_path = os.path.expanduser("/root/warp/collections/")
+    collection_path = INDEX_PATH
     collection = CustomCollection(
-        name="pints_ai", path=collection_path, passages=passages
+        name=DATASET_NAME, path=collection_path, passages=passages
     )
     config = CustomWARPRunConfig(
-        nbits=4,
+        nbits=NBITS,
         collection=collection,
     )
 
