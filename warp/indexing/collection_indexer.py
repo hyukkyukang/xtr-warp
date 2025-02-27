@@ -86,7 +86,6 @@ class CollectionIndexer:
             ),  # Use all pids
             rank=self.rank,
             nranks=self.nranks,
-            batch_size_to_consider=self.encoder.batch_size,
         )
         assert sampled_collection.is_valid_batch_size(
             self.encoder.batch_size
