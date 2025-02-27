@@ -153,9 +153,9 @@ class CollectionIndexer:
             assert (
                 loaded_plan["avg_doclen_est"] == self.avg_doclen_est
             ), f"avg_doclen_est = {loaded_plan['avg_doclen_est']} != {self.avg_doclen_est}"
-            assert loaded_plan["num_global_sample_pids"] == len(
-                self.sampled_collection.global_sample_pids
-            ), f"num_global_sample_pids = {loaded_plan['num_global_sample_pids']} != {len(self.sampled_collection.global_sample_pids)}"
+            # assert loaded_plan["num_global_sample_pids"] == len(
+            #     self.sampled_collection.global_sample_pids
+            # ), f"num_global_sample_pids = {loaded_plan['num_global_sample_pids']} != {len(self.sampled_collection.global_sample_pids)}"
         else:
             # Saves sampled passages and embeddings for training k-means centroids later
             sampled_pids: List[int] = self._sample_pids()

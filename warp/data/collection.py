@@ -78,6 +78,7 @@ def collate_fn_with_worker_tokenizers(
         texts,
         add_special_tokens=True,
         padding=True,
+        max_length=512,
         return_tensors="pt",
         return_attention_mask=True,
     )
