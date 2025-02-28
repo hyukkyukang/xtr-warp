@@ -43,14 +43,16 @@ def run_benchmark(
         "multiple": lambda: searcher.search_multiple(queries, k, return_as_text),
         "batch": lambda: searcher.search_batch(queries, k, return_as_text),
     }
-
+    warmed_up = False
     # Run benchmarks for each method
     for method_name, method_func in methods.items():
         logger.info(f"Benchmarking {method_name} search method...")
 
         # Warm-up run
-        logger.info("Performing warm-up run...")
-        method_func()
+        if not warmed_up:
+            logger.info("Performing warm-up run...")
+            method_func()
+            warmed_up = True
 
         # Actual timed runs
         times = []
@@ -133,6 +135,7 @@ def main():
 
     # Define test queries - longer queries around 64 tokens when tokenized with Llama tokenizers
     queries = [
+        "The Silk Road facilitated cultural exchange and trade across Eurasia for nearly two millennia. Please analyze the historical development of these trade networks, the major goods exchanged and their economic significance, how religious ideas and cultural practices spread along these routes, the political entities that controlled different segments of the Silk Road throughout history, and how this ancient network compares to modern global trade systems and the contemporary Belt and Road Initiative.",
         "I'm researching the historical significance of Paris as the capital of France. Can you provide detailed information about its establishment as the capital, major historical events that took place there, and how it has evolved politically and culturally over the centuries?",
         "George Orwell's novel '1984' is considered one of the most influential dystopian works of the 20th century. Could you analyze the major themes of totalitarianism, surveillance, and thought control in the book, and explain how these concepts relate to modern society and contemporary political developments?",
         "Einstein's theory of relativity revolutionized our understanding of space, time, and gravity. I'd like to understand both the special and general theories, their mathematical foundations, experimental validations throughout history, and how they've influenced modern physics and cosmology up to the present day.",
@@ -143,6 +146,15 @@ def main():
         "The theory of evolution through natural selection fundamentally changed our understanding of life on Earth. Could you explain Darwin's original concepts, how modern genetics has enhanced evolutionary theory, the mechanisms of speciation and adaptation, and how evolutionary biology continues to develop with new discoveries in genomics and paleontology?",
         "The human immune system is an incredibly complex network of cells, tissues, and organs that protects us from disease. Please provide a detailed explanation of both innate and adaptive immunity, the role of different immune cells like T-cells and B-cells, how vaccines leverage immune memory, and how autoimmune disorders and immunodeficiencies develop.",
         "Quantum mechanics represents a fundamental shift from classical physics in describing the behavior of matter and energy at the atomic and subatomic scales. Could you elaborate on wave-particle duality, Heisenberg's uncertainty principle, quantum entanglement, superposition, the various interpretations of quantum theory, and how these principles are applied in modern technologies?",
+        "Artificial intelligence has rapidly evolved from theoretical concepts to practical applications that impact nearly every aspect of modern society. I'm interested in understanding the historical development of AI research, the fundamental algorithms and computational approaches that enable machine learning, current applications across different industries, ethical considerations regarding AI deployment, and how experts predict AI technologies will continue to evolve in the coming decades.",
+        "The human brain is often described as the most complex structure in the known universe. Could you explain in detail the neuroanatomy of the brain, how different regions coordinate to process information, the current scientific understanding of consciousness and cognition, major neurotransmitter systems and their functions, and how modern neuroscience techniques have advanced our knowledge of brain function and neurological disorders?",
+        "Biodiversity loss represents one of the most pressing environmental challenges of our time. Please provide an in-depth analysis of the primary causes of species extinction, the ecological consequences of reduced biodiversity in different ecosystems, how biodiversity is measured and monitored by scientists, international conservation efforts and their effectiveness, and the potential economic and social impacts of continued biodiversity decline.",
+        "The ancient civilizations of Mesopotamia are credited with numerous innovations that formed the foundation of human civilization. I'd like to understand the development of early Mesopotamian city-states, their agricultural and irrigation systems, the invention of writing and its impact on record-keeping and knowledge transmission, their religious beliefs and practices, and how their political and legal structures influenced subsequent civilizations throughout the Mediterranean and Middle East.",
+        "Cryptocurrency and blockchain technology have emerged as potentially transformative innovations in finance and digital record-keeping. Could you explain the fundamental cryptographic principles that enable blockchain systems, the differences between major cryptocurrencies and their underlying technologies, the environmental concerns associated with proof-of-work systems, regulatory challenges facing digital currencies, and potential applications of blockchain beyond financial transactions?",
+        "The Great Barrier Reef is the world's largest coral reef system and a vital marine ecosystem currently facing numerous threats. Please provide a detailed explanation of the reef's formation and ecological structure, the diverse species that comprise its ecosystem, the specific impacts of climate change including coral bleaching events, other anthropogenic pressures affecting reef health, and conservation strategies being implemented to preserve this natural wonder for future generations.",
+        "The Industrial Revolution fundamentally transformed economic systems, social structures, and daily life across Europe and North America. I'm interested in understanding the technological innovations that drove industrialization, how manufacturing processes evolved, the changing relationship between workers and employers, the environmental consequences of rapid industrialization, and how these historical developments continue to influence contemporary economic systems and labor practices.",
+        "Nuclear fusion has long been pursued as a potentially limitless and clean energy source. Could you provide a comprehensive explanation of the physics principles behind nuclear fusion, the technical challenges preventing commercial fusion power, the different approaches being researched including tokamak and inertial confinement designs, recent breakthroughs in fusion research, and realistic timelines for when fusion might contribute significantly to global energy production?",
+        "The Silk Road facilitated cultural exchange and trade across Eurasia for nearly two millennia. Please analyze the historical development of these trade networks, the major goods exchanged and their economic significance, how religious ideas and cultural practices spread along these routes, the political entities that controlled different segments of the Silk Road throughout history, and how this ancient network compares to modern global trade systems and the contemporary Belt and Road Initiative.",
     ]
 
     # Process queries to ensure they're exactly 64 tokens
@@ -172,59 +184,128 @@ def main():
         logger.info(f"Query length: {len(token_ids)} tokens")
 
     queries = modified_queries
-    # Repeat queries 10 times to test bigger batch search (of total size 100)
-    queries = queries * 10
+    # Repeat queries 50 times to test bigger batch search (of total size 1000)
+    queries = queries * 50
 
     # Test parameters
     k = 5
-    return_as_text = True
     num_runs = 10
 
-    # Test with local searcher
-    logger.info("Testing with local CustomSearcher...")
-    local_searcher = CustomSearcher()
-    local_results = run_benchmark(
-        local_searcher,
-        queries,
-        k=k,
-        return_as_text=return_as_text,
-        num_runs=num_runs,
-        is_remote=False,
-    )
-    print_comparison_table(local_results, queries)
+    # Test with different return_as_text settings
+    all_results = {
+        True: {},
+        False: {},
+    }  # Initialize the results dictionary outside the loop
 
-    # Test with remote searcher
-    logger.info("Testing with RemoteSearcher...")
-    remote_searcher = RemoteSearcher()
-    remote_results = run_benchmark(
-        remote_searcher,
-        queries,
-        k=k,
-        return_as_text=return_as_text,
-        num_runs=num_runs,
-        is_remote=True,
-    )
-    print_comparison_table(remote_results, queries)
+    for return_as_text in [True, False]:
+        print("\n" + "=" * 80)
+        print(f"BENCHMARKING WITH return_as_text={return_as_text}")
+        print("=" * 80)
 
-    # Compare local vs remote
+        # Test with local searcher
+        logger.info(
+            f"Testing with local CustomSearcher (return_as_text={return_as_text})..."
+        )
+        local_searcher = CustomSearcher()
+        local_results = run_benchmark(
+            local_searcher,
+            queries,
+            k=k,
+            return_as_text=return_as_text,
+            num_runs=num_runs,
+            is_remote=False,
+        )
+        print_comparison_table(local_results, queries)
+
+        # Store a copy of the results
+        all_results[return_as_text]["local"] = local_results.copy()
+
+        # Test with remote searcher
+        logger.info(f"Testing with RemoteSearcher (return_as_text={return_as_text})...")
+        remote_searcher = RemoteSearcher()
+        remote_results = run_benchmark(
+            remote_searcher,
+            queries,
+            k=k,
+            return_as_text=return_as_text,
+            num_runs=num_runs,
+            is_remote=True,
+        )
+        print_comparison_table(remote_results, queries)
+
+        # Store a copy of the results
+        all_results[return_as_text]["remote"] = remote_results.copy()
+
+        # Compare local vs remote
+        print("\n" + "=" * 80)
+        print(f"LOCAL VS REMOTE COMPARISON (return_as_text={return_as_text})")
+        print("=" * 80)
+        print(
+            f"{'Method':<10} | {'Local (s)':<10} | {'Remote (s)':<10} | {'Difference':<10} | {'Remote/Local':<12}"
+        )
+        print("-" * 80)
+
+        for method in local_results.keys():
+            local_time = local_results[method]["avg_time"]
+            remote_time = remote_results[method]["avg_time"]
+            diff = remote_time - local_time
+            ratio = remote_time / local_time
+
+            print(
+                f"{method:<10} | "
+                f"{local_time:<10.4f} | "
+                f"{remote_time:<10.4f} | "
+                f"{diff:<10.4f} | "
+                f"{ratio:<12.2f}x"
+            )
+
+        print("=" * 80)
+
+    # Compare return_as_text=True vs return_as_text=False
     print("\n" + "=" * 80)
-    print("LOCAL VS REMOTE COMPARISON")
+    print("RETURN AS TEXT TRUE VS FALSE COMPARISON")
     print("=" * 80)
+
+    # Print comparison table for local searcher
+    print("LOCAL SEARCHER - TRUE vs FALSE")
+    print("-" * 80)
     print(
-        f"{'Method':<10} | {'Local (s)':<10} | {'Remote (s)':<10} | {'Difference':<10} | {'Remote/Local':<12}"
+        f"{'Method':<10} | {'True (s)':<10} | {'False (s)':<10} | {'Difference':<10} | {'False/True':<12}"
     )
     print("-" * 80)
 
-    for method in local_results.keys():
-        local_time = local_results[method]["avg_time"]
-        remote_time = remote_results[method]["avg_time"]
-        diff = remote_time - local_time
-        ratio = remote_time / local_time
+    for method in all_results[True]["local"].keys():
+        true_time = all_results[True]["local"][method]["avg_time"]
+        false_time = all_results[False]["local"][method]["avg_time"]
+        diff = false_time - true_time
+        ratio = false_time / true_time if true_time > 0 else float("inf")
 
         print(
             f"{method:<10} | "
-            f"{local_time:<10.4f} | "
-            f"{remote_time:<10.4f} | "
+            f"{true_time:<10.4f} | "
+            f"{false_time:<10.4f} | "
+            f"{diff:<10.4f} | "
+            f"{ratio:<12.2f}x"
+        )
+
+    # Print comparison table for remote searcher
+    print("\nREMOTE SEARCHER - TRUE vs FALSE")
+    print("-" * 80)
+    print(
+        f"{'Method':<10} | {'True (s)':<10} | {'False (s)':<10} | {'Difference':<10} | {'False/True':<12}"
+    )
+    print("-" * 80)
+
+    for method in all_results[True]["remote"].keys():
+        true_time = all_results[True]["remote"][method]["avg_time"]
+        false_time = all_results[False]["remote"][method]["avg_time"]
+        diff = false_time - true_time
+        ratio = false_time / true_time if true_time > 0 else float("inf")
+
+        print(
+            f"{method:<10} | "
+            f"{true_time:<10.4f} | "
+            f"{false_time:<10.4f} | "
             f"{diff:<10.4f} | "
             f"{ratio:<12.2f}x"
         )
