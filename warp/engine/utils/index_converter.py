@@ -1,10 +1,10 @@
-import os
+import gc
 import json
-
-import torch
-import numpy as np
+import os
 from itertools import product
 
+import numpy as np
+import torch
 from tqdm import tqdm
 
 from warp.modeling.xtr import DOC_MAXLEN, QUERY_MAXLEN
@@ -102,9 +102,6 @@ def convert_index(index_path, destination_path=None):
     tensor_offsets = torch.zeros((num_partitions,), dtype=torch.int64)
     tensor_offsets[1:] = torch.cumsum(centroid_sizes[:-1], dim=0)
 
-    tensor_offsets = torch.zeros((num_partitions,), dtype=torch.int64)
-    tensor_offsets[1:] = torch.cumsum(centroid_sizes[:-1], dim=0)
-
     tensor_compacted_residuals = torch.zeros(
         (num_residuals, residual_dim), dtype=torch.uint8
     )
@@ -149,53 +146,93 @@ def convert_index(index_path, destination_path=None):
 
     print("> Repacking residuals")
 
-    reversed_bit_map = []
-    mask = (1 << nbits) - 1
-    for i in range(256):
-        # The reversed byte
-        z = 0
-        for j in range(8, 0, -nbits):
-            # Extract a subsequence of length n bits
-            x = (i >> (j - nbits)) & mask
+    # Move tensors to CPU for processing if they're on GPU
+    tensor_compacted_residuals_cpu = tensor_compacted_residuals.cpu()
 
-            # Reverse the endianness of each bit subsequence (e.g. 10 -> 01)
-            y = 0
-            for k in range(nbits - 1, -1, -1):
-                y += ((x >> (nbits - k - 1)) & 1) * (2**k)
+    # Process in smaller batches to reduce peak memory usage
+    def convert_in_batches(tensor_compacted_residuals, bucket_weights, nbits):
+        batch_size = 10_000_000  # Adjust based on your available memory
+        num_batches = (
+            tensor_compacted_residuals.shape[0] + batch_size - 1
+        ) // batch_size
 
-            # Set the corresponding bits in the output byte
-            z |= y
-            if j > nbits:
-                z <<= nbits
-        reversed_bit_map.append(z)
-    reversed_bit_map = torch.tensor(reversed_bit_map).to(torch.uint8)
+        # Pre-compute lookup tables more efficiently
+        keys_per_byte = 8 // nbits
+        num_weights = len(bucket_weights)
 
-    # A table of all possible lookup orders into bucket_weights
-    # given n bits per lookup
-    keys_per_byte = 8 // nbits
-    decompression_lookup_table = torch.tensor(
-        list(product(list(range(len(bucket_weights))), repeat=keys_per_byte))
-    ).to(torch.uint8)
+        # Generate lookup table more efficiently
+        if keys_per_byte <= 4:  # For nbits=2 or nbits=4
+            # Generate indices directly without using product()
+            indices = torch.arange(num_weights**keys_per_byte, dtype=torch.long)
+            decompression_lookup_table = torch.zeros(
+                (num_weights**keys_per_byte, keys_per_byte), dtype=torch.uint8
+            )
 
-    residuals_repacked_compacted = reversed_bit_map[tensor_compacted_residuals.long()]
-    residuals_repacked_compacted_d = decompression_lookup_table[
-        residuals_repacked_compacted.long()
-    ]
-    # NOTE This could easily be generalized to arbitrary powers of two.
-    if nbits == 4:
-        residuals_repacked_compacted_df = (
-            2**4 * residuals_repacked_compacted_d[:, :, 0]
-            + residuals_repacked_compacted_d[:, :, 1]
-        )
-    elif nbits == 2:
-        residuals_repacked_compacted_df = (
-            2**6 * residuals_repacked_compacted_d[:, :, 0]
-            + 2**4 * residuals_repacked_compacted_d[:, :, 1]
-            + 2**2 * residuals_repacked_compacted_d[:, :, 2]
-            + residuals_repacked_compacted_d[:, :, 3]
-        )
-    else: assert False
-    torch.save(
-        residuals_repacked_compacted_df,
-        os.path.join(destination_path, "residuals.repacked.compacted.pt"),
+            for i in range(keys_per_byte):
+                divisor = num_weights ** (keys_per_byte - i - 1)
+                decompression_lookup_table[:, i] = (indices // divisor) % num_weights
+        else:
+            # Fall back to original method for other cases
+            decompression_lookup_table = torch.tensor(
+                list(product(list(range(num_weights)), repeat=keys_per_byte))
+            ).to(torch.uint8)
+
+        # Process in batches
+        results = []
+        for i in tqdm(
+            range(num_batches),
+            desc="Repacking residuals",
+            total=num_batches,
+        ):
+            start_idx = i * batch_size
+            end_idx = min((i + 1) * batch_size, tensor_compacted_residuals.shape[0])
+
+            # Process this batch
+            batch = tensor_compacted_residuals[start_idx:end_idx]
+
+            # Apply the operations to the batch
+            residuals_repacked_batch = decompression_lookup_table[batch.long()]
+
+            # Apply the final transformation based on nbits
+            if nbits == 4:
+                residuals_repacked_batch_df = (
+                    2**4 * residuals_repacked_batch[:, :, 0]
+                    + residuals_repacked_batch[:, :, 1]
+                )
+            elif nbits == 2:
+                residuals_repacked_batch_df = (
+                    2**6 * residuals_repacked_batch[:, :, 0]
+                    + 2**4 * residuals_repacked_batch[:, :, 1]
+                    + 2**2 * residuals_repacked_batch[:, :, 2]
+                    + residuals_repacked_batch[:, :, 3]
+                )
+            else:
+                assert False
+
+            # Store the result for this batch
+            results.append(residuals_repacked_batch_df)
+
+            # Force cleanup
+            del residuals_repacked_batch
+
+            gc.collect()
+
+        # Combine the results
+        return torch.cat(results, dim=0)
+
+    # Replace the original code with a call to the batched version
+    residuals_repacked_compacted_df = convert_in_batches(
+        tensor_compacted_residuals_cpu, bucket_weights, nbits
     )
+
+    # Move back to GPU only if needed for subsequent operations
+    print(
+        f"> Moving repacked residuals from {residuals_repacked_compacted_df.device} to {tensor_compacted_residuals.device}"
+    )
+    residuals_repacked_compacted_df = residuals_repacked_compacted_df.to(
+        tensor_compacted_residuals.device
+    )
+    repacked_path = os.path.join(destination_path, "residuals.repacked.compacted.pt")
+    print(f"> Saving repacked residuals to {repacked_path}")
+    torch.save(residuals_repacked_compacted_df, repacked_path)
+    print("> Done!")
