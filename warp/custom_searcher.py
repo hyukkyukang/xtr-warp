@@ -93,7 +93,11 @@ class CustomSearcher:
         self.searcher = WARPSearcher(config)
 
     def search(
-        self, query: str, k: int = 10, return_as_text: bool = False
+        self,
+        query: str,
+        k: int = 10,
+        return_as_text: bool = False,
+        passage_idx_to_ignore: Optional[int] = None,
     ) -> Union[List[int], List[str]]:
         """
         Search for the top-k results matching the given query.
@@ -107,8 +111,26 @@ class CustomSearcher:
             Either a list of global chunk IDs or a list of text chunks,
             depending on the return_as_text parameter
         """
+        # Increase the k if passage_idx_to_ignore is provided,
+        # because we might have to ignore at most NUM_CHUNKS_PER_ITEM chunks
+        if passage_idx_to_ignore is not None:
+            k += NUM_CHUNKS_PER_ITEM
+
         # Search with the query
         global_chunk_ids, _, scores = self.searcher.search(query, k)
+
+        # If passage_idx_to_ignore is provided, check if the retrieved global chunk ids contain the passage_idx_to_ignore
+        if passage_idx_to_ignore is not None:
+            # Filter out the passage_idx_to_ignore from the retrieved global chunk ids
+            global_chunk_ids = list(
+                filter(
+                    lambda x: self.convert_global_chunk_id_to_passage_idx(x)
+                    != passage_idx_to_ignore,
+                    global_chunk_ids,
+                )
+            )
+            # Select the top-k results
+            global_chunk_ids = global_chunk_ids[:k]
 
         # If return_as_text is True, convert the global chunk ids to texts
         if return_as_text:
@@ -121,7 +143,11 @@ class CustomSearcher:
         return global_chunk_ids
 
     def search_multiple(
-        self, queries: List[str], k: int = 10, return_as_text: bool = False
+        self,
+        queries: List[str],
+        k: int = 10,
+        return_as_text: bool = False,
+        passage_idx_to_ignore: Optional[int] = None,
     ) -> Union[List[List[int]], List[List[str]]]:
         """
         Perform batch search for multiple queries one by one
@@ -134,10 +160,39 @@ class CustomSearcher:
         Returns:
             Either a list of lists of global chunk IDs or a list of lists of text chunks,
         """
+        # Increase the k if passage_idx_to_ignore is provided,
+        # because we might have to ignore at most NUM_CHUNKS_PER_ITEM chunks
+        if passage_idx_to_ignore is not None:
+            k += NUM_CHUNKS_PER_ITEM
+
         global_chunk_ids_list: List[List[int]] = []
         for query in queries:
             global_chunk_ids, _, scores = self.searcher.search(query, k)
             global_chunk_ids_list.append(global_chunk_ids)
+
+        # If passage_idx_to_ignore is provided, check if the retrieved global chunk ids contain the passage_idx_to_ignore
+        if passage_idx_to_ignore is not None:
+            # Convert the retrieved global chunk ids to input indices
+            input_sequence_indices_list: List[List[int]] = []
+            for global_chunk_ids in global_chunk_ids_list:
+                input_sequence_indices: List[int] = []
+                for global_chunk_id in global_chunk_ids:
+                    input_sequence_indices.append(
+                        self.convert_global_chunk_id_to_passage_idx(global_chunk_id)
+                    )
+                input_sequence_indices_list.append(input_sequence_indices)
+            # Filter out the ones that contain the passage_idx_to_ignore
+            global_chunk_ids_list: List[List[int]] = [
+                list(
+                    filter(lambda x: x != passage_idx_to_ignore, input_sequence_indices)
+                )
+                for input_sequence_indices in input_sequence_indices_list
+            ]
+            # Select the top-k results
+            global_chunk_ids_list: List[List[int]] = [
+                global_chunk_ids[:k] for global_chunk_ids in global_chunk_ids_list
+            ]
+
         # If return_as_text is True, convert the global chunk ids to texts
         if return_as_text:
             texts_list: List[List[str]] = []
@@ -152,7 +207,11 @@ class CustomSearcher:
         return global_chunk_ids_list
 
     def search_batch(
-        self, queries: List[str], k: int = 10, return_as_text: bool = False
+        self,
+        queries: List[str],
+        k: int = 10,
+        return_as_text: bool = False,
+        passage_idx_to_ignore: Optional[int] = None,
     ) -> Union[List[List[int]], List[List[str]]]:
         """
         Perform batch search for multiple queries at once.
@@ -166,6 +225,11 @@ class CustomSearcher:
             Either a list of lists of global chunk IDs or a list of lists of text chunks,
             depending on the return_as_text parameter
         """
+        # Increase the k if passage_idx_to_ignore is provided,
+        # because we might have to ignore at most NUM_CHUNKS_PER_ITEM chunks
+        if passage_idx_to_ignore is not None:
+            k += NUM_CHUNKS_PER_ITEM
+
         # Search with the queries
         # Convert queries to a dictionary with index as key (for batch search)
         queries_dict = {i: q for i, q in enumerate(queries)}
@@ -188,6 +252,18 @@ class CustomSearcher:
                 )
             return texts_list
         return global_chunk_ids_list
+
+    def convert_global_chunk_id_to_passage_idx(self, global_chunk_id: int) -> int:
+        """
+        Convert a global chunk ID to its corresponding input index.
+
+        Args:
+            global_chunk_id: The global ID of the chunk to convert
+
+        Returns:
+            The input index of the specified chunk
+        """
+        return global_chunk_id // NUM_CHUNKS_PER_ITEM
 
     def convert_global_chunk_id_to_text(self, global_chunk_id: int) -> str:
         """

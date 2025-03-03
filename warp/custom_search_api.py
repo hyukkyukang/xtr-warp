@@ -1,4 +1,4 @@
-from typing import List, Union
+from typing import List, Optional, Union
 
 import requests
 
@@ -23,7 +23,11 @@ class RemoteSearcher:
         self.server_url = server_url.rstrip("/")
 
     def search(
-        self, query: str, k: int = 10, return_as_text: bool = False
+        self,
+        query: str,
+        k: int = 10,
+        return_as_text: bool = False,
+        passage_idx_to_ignore: Optional[int] = None,
     ) -> Union[List[int], List[str]]:
         """
         Search for the top-k results matching the given query by sending a request to the server.
@@ -38,7 +42,12 @@ class RemoteSearcher:
             depending on the return_as_text parameter
         """
         # Prepare the request payload
-        payload = {"query": query, "k": k, "return_as_text": return_as_text}
+        payload = {
+            "query": query,
+            "k": k,
+            "return_as_text": return_as_text,
+            "passage_idx_to_ignore": passage_idx_to_ignore,
+        }
 
         # Send the request to the server
         response = requests.post(f"{self.server_url}/search", json=payload)
@@ -53,7 +62,11 @@ class RemoteSearcher:
             raise Exception(f"Search request failed: {error_message}")
 
     def search_multiple(
-        self, queries: List[str], k: int = 10, return_as_text: bool = False
+        self,
+        queries: List[str],
+        k: int = 10,
+        return_as_text: bool = False,
+        passage_idx_to_ignore: Optional[int] = None,
     ) -> Union[List[List[int]], List[List[str]]]:
         """
         Perform search for multiple queries by sending a request to the search_multiple endpoint.
@@ -67,7 +80,12 @@ class RemoteSearcher:
             Either a list of lists of global chunk IDs or a list of lists of text chunks
         """
         # Prepare the request payload
-        payload = {"queries": queries, "k": k, "return_as_text": return_as_text}
+        payload = {
+            "queries": queries,
+            "k": k,
+            "return_as_text": return_as_text,
+            "passage_idx_to_ignore": passage_idx_to_ignore,
+        }
 
         try:
             # Send the request to the search_multiple endpoint
@@ -93,7 +111,11 @@ class RemoteSearcher:
             return results
 
     def search_batch(
-        self, queries: List[str], k: int = 10, return_as_text: bool = False
+        self,
+        queries: List[str],
+        k: int = 10,
+        return_as_text: bool = False,
+        passage_idx_to_ignore: Optional[int] = None,
     ) -> Union[List[List[int]], List[List[str]]]:
         """
         Perform batch search for multiple queries at once by sending a request to the search_batch endpoint.
@@ -107,7 +129,12 @@ class RemoteSearcher:
             Either a list of lists of global chunk IDs or a list of lists of text chunks
         """
         # Prepare the request payload
-        payload = {"queries": queries, "k": k, "return_as_text": return_as_text}
+        payload = {
+            "queries": queries,
+            "k": k,
+            "return_as_text": return_as_text,
+            "passage_idx_to_ignore": passage_idx_to_ignore,
+        }
 
         try:
             # Send the request to the search_batch endpoint
